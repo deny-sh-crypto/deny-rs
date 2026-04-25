@@ -1,0 +1,22 @@
+[package]
+name = "deny-sh"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Deniable encryption library — algorithm-compatible with the TypeScript and Python deny.sh SDKs"
+license = "AGPL-3.0"
+repository = "https://github.com/deny-sh-crypto/deny-rs"
+keywords = ["encryption", "deniable", "aes", "scrypt", "cryptography"]
+categories = ["cryptography"]
+
+[dependencies]
+aes = "0.8"
+ctr = "0.9"
+cipher = "0.4"
+scrypt = "0.11"
+sha2 = "0.10"
+rand = "0.8"
+thiserror = "1"
+
+[dev-dependencies]
+hex = "0.4"
