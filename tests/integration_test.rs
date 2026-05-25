@@ -3,17 +3,24 @@ use deny_sh::{
     HEADER_LENGTH,
 };
 
-// --- KAT vectors from TypeScript tests ---
+// --- Cross-implementation Known Answer Tests ---
+//
+// These vectors are byte-identical across the four reference SDKs
+// (TypeScript, Python, Rust, Go) and gate cross-SDK ciphertext
+// interoperability. A regression in Argon2id parameters (t=3, m=64MiB,
+// p=1, variant=Argon2id, version=0x13), SHA-256 pre-hashing, or
+// AES-CTR composition will fail one of these tests before publishing.
+// Whitepaper §8 references these exact values.
 
 #[test]
 fn kat_derive_key_password1_password2_salt_aa() {
     let salt = [0xAAu8; 32];
     let key = derive_key("password1", "password2", &salt);
     let hex_key = hex::encode(&key);
-    assert!(
-        hex_key.starts_with("73dd642b"),
-        "Expected key starting with 73dd642b, got {}",
-        hex_key
+    assert_eq!(
+        hex_key,
+        "854e7acffd85eae6d45ed07e84237fddc887928270f591a41b36d57e675181d8",
+        "deriveKey(password1, password2, 0xAA*32) does not match cross-SDK KAT"
     );
 }
 
@@ -22,10 +29,72 @@ fn kat_derive_key_test_pw1_test_pw2_salt_01() {
     let salt = [0x01u8; 32];
     let key = derive_key("test-pw1", "test-pw2", &salt);
     let hex_key = hex::encode(&key);
-    assert!(
-        hex_key.starts_with("ed672cc0"),
-        "Expected key starting with ed672cc0, got {}",
-        hex_key
+    assert_eq!(
+        hex_key,
+        "d99364f250367785bff7a962331254b18138d2249c969e27b0f75060070fa3f6",
+        "deriveKey(test-pw1, test-pw2, 0x01*32) does not match cross-SDK KAT"
+    );
+}
+
+#[test]
+fn kat_full_ciphertext_byte_exact() {
+    // Inputs match Python tests/test_core.py:test_full_encrypt_decrypt_kat
+    // and TypeScript src/test/core.test.ts "KAT 3: full ciphertext".
+    use aes::Aes256;
+    use cipher::{generic_array::GenericArray, KeyIvInit, StreamCipher};
+    use ctr::Ctr128BE;
+
+    type Aes256Ctr = Ctr128BE<Aes256>;
+
+    let pw1 = "test-pw1";
+    let pw2 = "test-pw2";
+    let fixed_salt = [0x01u8; 32];
+    let fixed_iv = [0x02u8; 16];
+    let message = b"Hello, World!"; // 13 bytes
+    let control_data = [0x03u8; 17]; // message.len() + 4
+
+    // 1. Derive key (must match KAT 2)
+    let key = derive_key(pw1, pw2, &fixed_salt);
+    assert_eq!(
+        hex::encode(&key),
+        "d99364f250367785bff7a962331254b18138d2249c969e27b0f75060070fa3f6"
+    );
+
+    // 2. Build payload: LE32 length || plaintext
+    let mut payload = Vec::with_capacity(message.len() + 4);
+    payload.extend_from_slice(&(message.len() as u32).to_le_bytes());
+    payload.extend_from_slice(message);
+    assert_eq!(hex::encode(&payload), "0d00000048656c6c6f2c20576f726c6421");
+
+    // 3. XOR with control data
+    let mut xored = vec![0u8; payload.len()];
+    for i in 0..payload.len() {
+        xored[i] = payload[i] ^ control_data[i];
+    }
+    assert_eq!(hex::encode(&xored), "0e0303034b666f6f6c2f23546c716f6722");
+
+    // 4. AES-256-CTR encrypt with fixed IV
+    let mut cipher = Aes256Ctr::new(
+        GenericArray::from_slice(&key),
+        GenericArray::from_slice(&fixed_iv),
+    );
+    let mut encrypted = xored.clone();
+    cipher.apply_keystream(&mut encrypted);
+    assert_eq!(
+        hex::encode(&encrypted),
+        "7c5cd13699e85f6bcde6dad013d48047ca"
+    );
+
+    // 5. Full wire-format ciphertext = salt(32) || iv(16) || encrypted(17)
+    let mut full_ct = Vec::with_capacity(32 + 16 + encrypted.len());
+    full_ct.extend_from_slice(&fixed_salt);
+    full_ct.extend_from_slice(&fixed_iv);
+    full_ct.extend_from_slice(&encrypted);
+    assert_eq!(
+        hex::encode(&full_ct),
+        "0101010101010101010101010101010101010101010101010101010101010101\
+         02020202020202020202020202020202\
+         7c5cd13699e85f6bcde6dad013d48047ca"
     );
 }
 
@@ -280,5 +349,50 @@ fn control_data_looks_random() {
         seen.len() > 100,
         "Expected >100 unique bytes in 256 random bytes, got {}",
         seen.len()
+    );
+}
+
+// --- Argon2id parameter pinning ---
+//
+// If any of these constants ever drifts (e.g. a future refactor changes
+// m=65536 to m=131072), a derive_key call with known inputs will produce
+// DIFFERENT output from the locked KAT vectors above. This test asserts
+// the PARAMETERS THEMSELVES rather than the resulting hex so that the
+// failure message names the bad constant directly.
+#[test]
+fn argon2id_parameters_are_locked() {
+    use argon2::{Algorithm, Argon2, Params, Version};
+    use sha2::{Digest, Sha256};
+
+    // These are the locked v2.0.0 cross-SDK parameters.
+    const LOCKED_M_COST: u32 = 65536;
+    const LOCKED_T_COST: u32 = 3;
+    const LOCKED_P_COST: u32 = 1;
+    const LOCKED_OUTPUT_LEN: usize = 32;
+
+    let mut h = Sha256::new();
+    h.update("password1".as_bytes());
+    let pw1 = h.finalize();
+    let mut h = Sha256::new();
+    h.update("password2".as_bytes());
+    let pw2 = h.finalize();
+    let mut combined = Vec::with_capacity(64);
+    combined.extend_from_slice(&pw1);
+    combined.extend_from_slice(&pw2);
+    let salt = [0xAAu8; 32];
+
+    let params = Params::new(LOCKED_M_COST, LOCKED_T_COST, LOCKED_P_COST, Some(LOCKED_OUTPUT_LEN))
+        .expect("valid argon2 params");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = vec![0u8; LOCKED_OUTPUT_LEN];
+    argon2
+        .hash_password_into(&combined, &salt, &mut key)
+        .expect("argon2 derivation");
+
+    assert_eq!(
+        hex::encode(&key),
+        "854e7acffd85eae6d45ed07e84237fddc887928270f591a41b36d57e675181d8",
+        "Argon2id parameter pinning failed; one of t={} m={} p={} len={} has drifted",
+        LOCKED_T_COST, LOCKED_M_COST, LOCKED_P_COST, LOCKED_OUTPUT_LEN
     );
 }

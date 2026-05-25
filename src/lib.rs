@@ -5,7 +5,7 @@
 //! ## Algorithm
 //!
 //! **Encrypt:**
-//! 1. Derive AES-256 key from password1 + password2 via scrypt
+//! 1. Derive AES-256 key from password1 + password2 via Argon2id
 //! 2. Prepend 4-byte LE plaintext length to plaintext (inside encrypted zone)
 //! 3. XOR (length + plaintext) with control data
 //! 4. AES-256-CTR encrypt the result
@@ -26,6 +26,7 @@
 //! 4. Now decrypting with new control file produces the fake plaintext
 
 use aes::Aes256;
+use argon2::{Algorithm, Argon2, Params, Version};
 use cipher::generic_array::GenericArray;
 use cipher::{KeyIvInit, StreamCipher};
 use ctr::Ctr128BE;
@@ -46,10 +47,10 @@ pub const HEADER_LENGTH: usize = SALT_LENGTH + IV_LENGTH; // 48
 /// Length prefix size (4-byte little-endian u32)
 const LENGTH_PREFIX: usize = 4;
 
-// scrypt parameters
-const SCRYPT_LOG_N: u8 = 14; // N = 2^14 = 16384
-const SCRYPT_R: u32 = 8;
-const SCRYPT_P: u32 = 1;
+// Argon2id parameters
+const ARGON2_T_COST: u32 = 3;
+const ARGON2_M_COST: u32 = 65536;
+const ARGON2_P: u32 = 1;
 
 // --- Error types ---
 
@@ -79,10 +80,10 @@ type Aes256Ctr = Ctr128BE<Aes256>;
 
 // --- Key Derivation ---
 
-/// Derive AES-256 key from two passwords using scrypt.
+/// Derive AES-256 key from two passwords using Argon2id.
 ///
 /// Combines both passwords via SHA-256 hashing to avoid length ambiguities:
-/// `scrypt(SHA-256(pw1) || SHA-256(pw2), salt, ...)`
+/// `Argon2id(SHA-256(pw1) || SHA-256(pw2), salt, ...)`
 pub fn derive_key(password1: &str, password2: &str, salt: &[u8]) -> Vec<u8> {
     // SHA-256 each password
     let pw1_hash = Sha256::digest(password1.as_bytes());
@@ -93,11 +94,14 @@ pub fn derive_key(password1: &str, password2: &str, salt: &[u8]) -> Vec<u8> {
     combined.extend_from_slice(&pw1_hash);
     combined.extend_from_slice(&pw2_hash);
 
-    // scrypt KDF
-    let params = scrypt::Params::new(SCRYPT_LOG_N, SCRYPT_R, SCRYPT_P, KEY_LENGTH)
-        .expect("valid scrypt params");
+    // Argon2id KDF
+    let params = Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P, Some(KEY_LENGTH))
+        .expect("valid argon2 params");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = vec![0u8; KEY_LENGTH];
-    scrypt::scrypt(&combined, salt, &params, &mut key).expect("scrypt derivation");
+    argon2
+        .hash_password_into(&combined, salt, &mut key)
+        .expect("argon2 derivation");
     key
 }
 
