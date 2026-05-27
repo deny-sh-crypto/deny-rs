@@ -1,6 +1,6 @@
 # deny-sh (Rust)
 
-Deniable encryption library, algorithm-compatible with the [TypeScript](https://www.npmjs.com/package/deny-sh), [Go](https://pkg.go.dev/github.com/deny-sh-crypto/deny-go), and [Python](https://pypi.org/project/deny-sh/) deny.sh SDKs. Ciphertext is byte-for-byte compatible across all four languages.
+Deniable encryption library, algorithm-compatible with the [TypeScript](https://www.npmjs.com/package/deny-sh), [Go](https://pkg.go.dev/github.com/deny-sh-crypto/deny-go/v2), and [Python](https://pypi.org/project/deny-sh/) deny.sh SDKs. Ciphertext is byte-for-byte compatible across all four languages.
 
 Part of the **Encrypt pillar** of [deny.sh](https://deny.sh), the deniability infrastructure. Apache 2.0, zero copyleft, free for any use.
 
