@@ -32,7 +32,15 @@ use cipher::{KeyIvInit, StreamCipher};
 use ctr::Ctr128BE;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use std::string::FromUtf8Error;
 use thiserror::Error;
+
+mod honey;
+pub use honey::{
+    base58_check_encode, base58_encode, bip39_from_entropy, derive_honey_seed,
+    generate_honey_decoy, is_honey_eligible, is_well_formed_frame, sourced_int, HoneyError,
+    SeededByteSource,
+};
 
 // --- Constants ---
 
@@ -46,6 +54,8 @@ pub const KEY_LENGTH: usize = 32;
 pub const HEADER_LENGTH: usize = SALT_LENGTH + IV_LENGTH; // 48
 /// Length prefix size (4-byte little-endian u32)
 const LENGTH_PREFIX: usize = 4;
+const BUCKET_BANDS: [usize; 5] = [64, 256, 1024, 4096, 16384];
+const BUCKET_STEP_ABOVE_TOP: usize = 16384;
 
 // Argon2id parameters
 const ARGON2_T_COST: u32 = 3;
@@ -56,8 +66,13 @@ const ARGON2_P: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("Control data ({control_len} bytes) must be >= plaintext + 4 bytes ({required} bytes)")]
+    #[error(
+        "Control data ({control_len} bytes) must be >= plaintext + 4 bytes ({required} bytes)"
+    )]
     ControlDataTooShort { control_len: usize, required: usize },
+
+    #[error("Control data ({control_len} bytes) must be >= ciphertext payload ({required} bytes)")]
+    ControlDataPayloadTooShort { control_len: usize, required: usize },
 
     #[error("Ciphertext too short - missing header")]
     CiphertextTooShort,
@@ -70,6 +85,40 @@ pub enum Error {
 
     #[error("Key derivation failed: {0}")]
     KeyDerivation(String),
+
+    #[error("{0}")]
+    Honey(#[from] HoneyError),
+
+    #[error("Invalid UTF-8 plaintext: {0}")]
+    Utf8(#[from] FromUtf8Error),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptHoneyResult {
+    pub ciphertext: Vec<u8>,
+    pub real_ctrl: Vec<u8>,
+    pub band: usize,
+    pub honey_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HoneyBranch {
+    Real,
+    Honey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecryptHoneyResult {
+    pub value: String,
+    pub branch: HoneyBranch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecryptPayloadResult {
+    pub payload: Vec<u8>,
+    pub salt: Vec<u8>,
+    pub well_formed: bool,
+    pub plaintext: Vec<u8>,
 }
 
 // --- Type alias for AES-256-CTR ---
@@ -112,6 +161,15 @@ pub fn generate_control_data(size: usize) -> Vec<u8> {
     let mut data = vec![0u8; size];
     rand::rngs::OsRng.fill_bytes(&mut data);
     data
+}
+
+pub fn bucketed_payload_length(raw_payload_length: usize) -> usize {
+    for band in BUCKET_BANDS {
+        if raw_payload_length <= band {
+            return band;
+        }
+    }
+    raw_payload_length.div_ceil(BUCKET_STEP_ABOVE_TOP) * BUCKET_STEP_ABOVE_TOP
 }
 
 // --- Internal helpers ---
@@ -193,7 +251,10 @@ pub fn encrypt(
     let xored = xor_bytes(&payload, control_slice);
 
     // AES-256-CTR encrypt
-    let mut cipher = Aes256Ctr::new(GenericArray::from_slice(&key), GenericArray::from_slice(&iv));
+    let mut cipher = Aes256Ctr::new(
+        GenericArray::from_slice(&key),
+        GenericArray::from_slice(&iv),
+    );
     let mut encrypted = xored;
     cipher.apply_keystream(&mut encrypted);
 
@@ -204,6 +265,122 @@ pub fn encrypt(
     result.extend_from_slice(&encrypted);
 
     Ok((result, control))
+}
+
+pub fn encrypt_honey(
+    secret: &str,
+    password1: &str,
+    password2: &str,
+    honey_type: &str,
+) -> Result<EncryptHoneyResult, Error> {
+    if !is_honey_eligible(honey_type) {
+        return Err(HoneyError::IneligibleType(honey_type.to_string()).into());
+    }
+
+    let plaintext = secret.as_bytes();
+    let raw_payload = build_payload(plaintext);
+    let band = bucketed_payload_length(raw_payload.len());
+    let control = generate_control_data(band);
+
+    let mut payload = vec![0u8; band];
+    payload[..raw_payload.len()].copy_from_slice(&raw_payload);
+    if band > raw_payload.len() {
+        rand::rngs::OsRng.fill_bytes(&mut payload[raw_payload.len()..]);
+    }
+
+    let mut salt = [0u8; SALT_LENGTH];
+    let mut iv = [0u8; IV_LENGTH];
+    rand::rngs::OsRng.fill_bytes(&mut salt);
+    rand::rngs::OsRng.fill_bytes(&mut iv);
+
+    let key = derive_key(password1, password2, &salt);
+    let control_slice = &control[..payload.len()];
+    let xored = xor_bytes(&payload, control_slice);
+
+    let mut cipher = Aes256Ctr::new(
+        GenericArray::from_slice(&key),
+        GenericArray::from_slice(&iv),
+    );
+    let mut encrypted = xored;
+    cipher.apply_keystream(&mut encrypted);
+
+    let mut ciphertext = Vec::with_capacity(HEADER_LENGTH + encrypted.len());
+    ciphertext.extend_from_slice(&salt);
+    ciphertext.extend_from_slice(&iv);
+    ciphertext.extend_from_slice(&encrypted);
+
+    Ok(EncryptHoneyResult {
+        ciphertext,
+        real_ctrl: control,
+        band,
+        honey_type: honey_type.to_string(),
+    })
+}
+
+pub fn decrypt_to_payload(
+    ciphertext: &[u8],
+    password1: &str,
+    password2: &str,
+    control_data: &[u8],
+    expected_band: Option<usize>,
+) -> Result<DecryptPayloadResult, Error> {
+    if ciphertext.len() < HEADER_LENGTH {
+        return Err(Error::CiphertextTooShort);
+    }
+
+    let salt = &ciphertext[..SALT_LENGTH];
+    let iv = &ciphertext[SALT_LENGTH..HEADER_LENGTH];
+    let encrypted_data = &ciphertext[HEADER_LENGTH..];
+
+    let key = derive_key(password1, password2, salt);
+    let mut cipher = Aes256Ctr::new(GenericArray::from_slice(&key), GenericArray::from_slice(iv));
+    let mut decrypted = encrypted_data.to_vec();
+    cipher.apply_keystream(&mut decrypted);
+
+    if control_data.len() < decrypted.len() {
+        return Err(Error::ControlDataPayloadTooShort {
+            control_len: control_data.len(),
+            required: decrypted.len(),
+        });
+    }
+    let control_slice = &control_data[..decrypted.len()];
+    let payload = xor_bytes(&decrypted, control_slice);
+    let well_formed = is_well_formed_frame(&payload, expected_band);
+    let plaintext = extract_payload(&payload)?;
+
+    Ok(DecryptPayloadResult {
+        payload,
+        salt: salt.to_vec(),
+        well_formed,
+        plaintext,
+    })
+}
+
+pub fn decrypt_honey(
+    ciphertext: &[u8],
+    control_data: &[u8],
+    password1: &str,
+    password2: &str,
+    honey_type: &str,
+    band: usize,
+) -> Result<DecryptHoneyResult, Error> {
+    if !is_honey_eligible(honey_type) {
+        return Err(HoneyError::IneligibleType(honey_type.to_string()).into());
+    }
+
+    let recovered = decrypt_to_payload(ciphertext, password1, password2, control_data, Some(band))?;
+
+    if recovered.well_formed {
+        return Ok(DecryptHoneyResult {
+            value: String::from_utf8(recovered.plaintext)?,
+            branch: HoneyBranch::Real,
+        });
+    }
+
+    Ok(DecryptHoneyResult {
+        value: generate_honey_decoy(honey_type, &recovered.payload, &recovered.salt, None)?,
+        branch: HoneyBranch::Honey,
+    })
 }
 
 /// Decrypt ciphertext using dual passwords and the original control file.
@@ -228,7 +405,10 @@ pub fn decrypt(
     let key = derive_key(password1, password2, salt);
 
     // AES-256-CTR decrypt
-    let mut cipher = Aes256Ctr::new(GenericArray::from_slice(&key), GenericArray::from_slice(&iv));
+    let mut cipher = Aes256Ctr::new(
+        GenericArray::from_slice(&key),
+        GenericArray::from_slice(&iv),
+    );
     let mut decrypted = encrypted_data.to_vec();
     cipher.apply_keystream(&mut decrypted);
 
@@ -278,7 +458,10 @@ pub fn generate_deniable_control(
     let key = derive_key(password1, password2, salt);
 
     // AES decrypt to get intermediate (= original payload XOR original control data)
-    let mut cipher = Aes256Ctr::new(GenericArray::from_slice(&key), GenericArray::from_slice(&iv));
+    let mut cipher = Aes256Ctr::new(
+        GenericArray::from_slice(&key),
+        GenericArray::from_slice(&iv),
+    );
     let mut intermediate = encrypted_data.to_vec();
     cipher.apply_keystream(&mut intermediate);
 
