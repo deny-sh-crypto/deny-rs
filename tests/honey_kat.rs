@@ -1,6 +1,7 @@
 use deny_sh::{
-    decrypt_honey, derive_honey_seed, encrypt_honey, generate_honey_decoy, is_honey_eligible,
-    is_well_formed_frame, sourced_int, HoneyBranch, HoneyError, SeededByteSource,
+    decrypt_honey, decrypt_honey_with_branch, derive_honey_seed, encrypt_honey,
+    generate_honey_decoy, is_honey_eligible, is_well_formed_frame, sourced_int, HoneyBranch,
+    HoneyError, SeededByteSource,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -217,7 +218,8 @@ fn honey_wrappers_roundtrip_real_branch() {
     assert!(is_honey_eligible("stripe-live-key"));
     assert!(!is_honey_eligible("generic"));
 
-    let decrypted = decrypt_honey(
+    // Public decrypt_honey exposes only value (branch oracle stripped).
+    let pub_result = decrypt_honey(
         &encrypted.ciphertext,
         &encrypted.real_ctrl,
         "correct-honey-pw-1",
@@ -226,6 +228,18 @@ fn honey_wrappers_roundtrip_real_branch() {
         encrypted.band,
     )
     .expect("decrypt_honey");
+    assert_eq!(pub_result.value, secret);
+
+    // Internal helper retains the branch for test/telemetry assertions.
+    let decrypted = decrypt_honey_with_branch(
+        &encrypted.ciphertext,
+        &encrypted.real_ctrl,
+        "correct-honey-pw-1",
+        "correct-honey-pw-2",
+        "stripe-live-key",
+        encrypted.band,
+    )
+    .expect("decrypt_honey_with_branch");
 
     assert_eq!(decrypted.value, secret);
     assert_eq!(decrypted.branch, HoneyBranch::Real);

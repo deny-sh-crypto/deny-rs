@@ -107,8 +107,22 @@ pub enum HoneyBranch {
     Honey,
 }
 
+/// High-level Honey Mode decrypt output (PUBLIC).
+///
+/// Exposes ONLY `value`. The real-vs-honey branch is a perfect distinguisher
+/// and MUST NOT be surfaced to SDK consumers: a caller who logged or returned
+/// it would hand an attacker exactly the oracle Honey Mode exists to deny. The
+/// branch is available only via the internal `decrypt_honey_with_branch` helper
+/// used by tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecryptHoneyResult {
+    pub value: String,
+}
+
+/// Internal honey decrypt outcome carrying branch telemetry. Not part of the
+/// stable public contract; `pub(crate)` for tests/telemetry only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecryptHoneyInternalResult {
     pub value: String,
     pub branch: HoneyBranch,
 }
@@ -364,6 +378,26 @@ pub fn decrypt_honey(
     honey_type: &str,
     band: usize,
 ) -> Result<DecryptHoneyResult, Error> {
+    let res = decrypt_honey_with_branch(
+        ciphertext,
+        control_data,
+        password1,
+        password2,
+        honey_type,
+        band,
+    )?;
+    Ok(DecryptHoneyResult { value: res.value })
+}
+
+/// Internal honey decrypt retaining branch telemetry. Not for SDK consumers.
+pub fn decrypt_honey_with_branch(
+    ciphertext: &[u8],
+    control_data: &[u8],
+    password1: &str,
+    password2: &str,
+    honey_type: &str,
+    band: usize,
+) -> Result<DecryptHoneyInternalResult, Error> {
     if !is_honey_eligible(honey_type) {
         return Err(HoneyError::IneligibleType(honey_type.to_string()).into());
     }
@@ -371,13 +405,13 @@ pub fn decrypt_honey(
     let recovered = decrypt_to_payload(ciphertext, password1, password2, control_data, Some(band))?;
 
     if recovered.well_formed {
-        return Ok(DecryptHoneyResult {
+        return Ok(DecryptHoneyInternalResult {
             value: String::from_utf8(recovered.plaintext)?,
             branch: HoneyBranch::Real,
         });
     }
 
-    Ok(DecryptHoneyResult {
+    Ok(DecryptHoneyInternalResult {
         value: generate_honey_decoy(honey_type, &recovered.payload, &recovered.salt, None)?,
         branch: HoneyBranch::Honey,
     })

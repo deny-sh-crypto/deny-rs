@@ -5,6 +5,8 @@ const HONEY_DOMAIN: &[u8] = b"deny-sh/honey/v1";
 const ALNUM: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const ALNUM_UPPER: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 const BASE64URL: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+const BASE64: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const AZURE_SECRET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-";
 const HEX: &str = "0123456789abcdef";
 const BASE58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const PRINTABLE: &str =
@@ -40,7 +42,16 @@ pub fn is_honey_eligible(type_tag: &str) -> bool {
     // until a byte-exact port lands. Must match the TS HONEY_INELIGIBLE set.
     !matches!(
         type_tag,
-        "generic" | "freeform-secret" | "jwt-token" | "postgres-uri" | "mongodb-uri"
+        "generic"
+            | "freeform-secret"
+            | "jwt-token"
+            | "postgres-uri"
+            | "mongodb-uri"
+            // gcp-service-account-key is a JSON blob (PEM body + parsed
+            // identifiers): same byte-parity-unprovable class as the URI types.
+            // The other three cloud types are simple charset tokens and ARE
+            // honey-eligible.
+            | "gcp-service-account-key"
     )
 }
 
@@ -174,6 +185,9 @@ fn default_length_for_type(type_tag: &str) -> Option<usize> {
         "slack-user-token" => 65,
         "discord-bot-token" => 72,
         "digitalocean-pat" => 71,
+        "gcp-api-key" => 39,
+        "azure-client-secret" => 40,
+        "azure-storage-key" => 88,
         "twilio-auth-token" => 34,
         "sendgrid-key" => 69,
         "huggingface-token" => 40,
@@ -258,7 +272,10 @@ fn dummy_real_for_type(type_tag: &str, len_hint: usize) -> HoneyResult<String> {
         | "solana-private-key"
         | "uk-nhs-number"
         | "us-ssn"
-        | "uk-ni-number" => Ok("x".repeat(len_hint)),
+        | "uk-ni-number"
+        | "gcp-api-key"
+        | "azure-client-secret"
+        | "azure-storage-key" => Ok("x".repeat(len_hint)),
         _ => Err(HoneyError::UnsupportedHoneyType(type_tag.to_string())),
     }
 }
@@ -341,6 +358,24 @@ fn generate_local_decoy(
         )),
         "discord-bot-token" => random_discord_bot_token(real_value, src),
         "digitalocean-pat" => token("dop_v1_", real_len, HEX, 64, Some(64), src),
+        "gcp-api-key" => token("AIza", real_len, BASE64URL, 35, Some(35), src),
+        "azure-client-secret" => {
+            if real_len < 34 {
+                return Err(HoneyError::GeneratedDecoyTooLong);
+            }
+            let cs_len = real_len.min(44);
+            Ok(format!(
+                "{}~{}",
+                chars(ALNUM, 4, src)?,
+                chars(AZURE_SECRET, cs_len - 5, src)?
+            ))
+        }
+        "azure-storage-key" => {
+            if real_len < 88 {
+                return Err(HoneyError::GeneratedDecoyTooLong);
+            }
+            Ok(format!("{}==", chars(BASE64, 86, src)?))
+        }
         "twilio-auth-token" => token("SK", real_len, HEX, 32, Some(32), src),
         "sendgrid-key" => {
             if real_len < 69 {

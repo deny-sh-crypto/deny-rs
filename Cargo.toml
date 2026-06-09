@@ -1,6 +1,6 @@
 [package]
 name = "deny-sh"
-version = "2.1.1"
+version = "2.2.0"
 edition = "2021"
 rust-version = "1.70"
 description = "Deniable encryption library — algorithm-compatible with the TypeScript and Python deny.sh SDKs"
