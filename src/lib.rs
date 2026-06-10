@@ -120,11 +120,21 @@ pub struct DecryptHoneyResult {
 }
 
 /// Internal honey decrypt outcome carrying branch telemetry. Not part of the
-/// stable public contract; `pub(crate)` for tests/telemetry only.
+/// stable public contract: visible to the public API only under the
+/// `internal-testing` feature (the KAT integration test), `pub(crate)`
+/// otherwise. The `branch` field is a perfect real-vs-honey distinguisher.
+#[cfg(feature = "internal-testing")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecryptHoneyInternalResult {
     pub value: String,
     pub branch: HoneyBranch,
+}
+
+#[cfg(not(feature = "internal-testing"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DecryptHoneyInternalResult {
+    pub(crate) value: String,
+    pub(crate) branch: HoneyBranch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,8 +399,38 @@ pub fn decrypt_honey(
     Ok(DecryptHoneyResult { value: res.value })
 }
 
-/// Internal honey decrypt retaining branch telemetry. Not for SDK consumers.
+/// Internal honey decrypt retaining branch telemetry. Not for SDK consumers:
+/// public only under the `internal-testing` feature (KAT test). The `branch`
+/// it returns is the exact real-vs-honey oracle Honey Mode exists to deny.
+#[cfg(feature = "internal-testing")]
 pub fn decrypt_honey_with_branch(
+    ciphertext: &[u8],
+    control_data: &[u8],
+    password1: &str,
+    password2: &str,
+    honey_type: &str,
+    band: usize,
+) -> Result<DecryptHoneyInternalResult, Error> {
+    decrypt_honey_with_branch_impl(
+        ciphertext, control_data, password1, password2, honey_type, band,
+    )
+}
+
+#[cfg(not(feature = "internal-testing"))]
+pub(crate) fn decrypt_honey_with_branch(
+    ciphertext: &[u8],
+    control_data: &[u8],
+    password1: &str,
+    password2: &str,
+    honey_type: &str,
+    band: usize,
+) -> Result<DecryptHoneyInternalResult, Error> {
+    decrypt_honey_with_branch_impl(
+        ciphertext, control_data, password1, password2, honey_type, band,
+    )
+}
+
+fn decrypt_honey_with_branch_impl(
     ciphertext: &[u8],
     control_data: &[u8],
     password1: &str,

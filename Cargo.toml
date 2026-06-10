@@ -1,6 +1,6 @@
 [package]
 name = "deny-sh"
-version = "2.2.0"
+version = "2.2.1"
 edition = "2021"
 rust-version = "1.70"
 description = "Deniable encryption library — algorithm-compatible with the TypeScript and Python deny.sh SDKs"
@@ -8,6 +8,13 @@ license = "Apache-2.0"
 repository = "https://github.com/deny-sh-crypto/deny-rs"
 keywords = ["encryption", "deniable", "aes", "argon2", "cryptography"]
 categories = ["cryptography"]
+
+[features]
+# Exposes the branch-carrying honey decrypt helper as a public API. Enabled
+# ONLY by the KAT integration test. NEVER enable in a consumer build: the
+# real-vs-honey branch is a perfect distinguisher (the exact oracle Honey Mode
+# exists to deny).
+internal-testing = []
 
 [dependencies]
 aes = "0.8"

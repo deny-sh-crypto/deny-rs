@@ -1,3 +1,7 @@
+// Requires the branch-carrying internal helper, public only under this feature.
+// Run with: cargo test --features internal-testing
+#![cfg(feature = "internal-testing")]
+
 use deny_sh::{
     decrypt_honey, decrypt_honey_with_branch, derive_honey_seed, encrypt_honey,
     generate_honey_decoy, is_honey_eligible, is_well_formed_frame, sourced_int, HoneyBranch,
